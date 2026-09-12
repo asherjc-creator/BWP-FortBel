@@ -1,5 +1,5 @@
 """
-90-Day Revenue Management Model — Extended
+90-Day Revenue Management Model — Full Version
 Best Western Plus Alexandria / Fort Belvoir (Property Code 47093)
 
 Features:
@@ -7,6 +7,12 @@ Features:
 - Calendar heatmap view
 - AI-assisted rate recommendations with reasoning
 - Demand signals: airline arrivals (DCA/IAD) + visitor/event index
+- Scenario planner + day-of-week analysis
+
+requirements.txt:
+    plotly
+    openpyxl
+    matplotlib
 """
 
 import streamlit as st
@@ -47,23 +53,19 @@ EVENTS = {
 }
 
 # -------------------------------------------------------------------
-# DEMAND SIGNALS (simulated airline + visitor index)
-# Replace with real API pulls (e.g., FAA, Cirium, STR, Arrivalist)
+# DEMAND SIGNALS (simulated)
 # -------------------------------------------------------------------
 @st.cache_data
 def build_demand_signals():
     dates = [START_DATE + timedelta(days=i) for i in range(DAYS)]
     rng = np.random.default_rng(42)
 
-    # Airline arrivals (DCA + IAD combined, index 0–100)
     airline = 60 + 25 * np.sin(np.linspace(0, 3 * np.pi, DAYS)) + rng.normal(0, 6, DAYS)
     airline = np.clip(airline, 20, 100)
 
-    # Visitor / tourism index
     visitor = 55 + 20 * np.cos(np.linspace(0, 2 * np.pi, DAYS)) + rng.normal(0, 5, DAYS)
     visitor = np.clip(visitor, 20, 100)
 
-    # Search interest (Google Trends-style)
     search = 50 + 15 * np.sin(np.linspace(0, 4 * np.pi, DAYS)) + rng.normal(0, 7, DAYS)
     search = np.clip(search, 15, 100)
 
@@ -83,7 +85,6 @@ st.sidebar.image(
 )
 st.sidebar.title("Revenue Controls")
 
-# --- Data Upload ---
 st.sidebar.markdown("### 📤 Upload 90-Day Data")
 st.sidebar.caption("CSV or Excel. Expected columns: Date, Occupancy, ADR, Rooms_Sold (optional).")
 
@@ -103,20 +104,17 @@ if uploaded is not None:
 
 st.sidebar.markdown("---")
 
-# --- Rate adjustment ---
 rate_adjust = st.sidebar.slider(
     "Global Rate Adjustment (%)",
     min_value=-20, max_value=30, value=0, step=1
 )
 
-# --- AI assist toggle ---
 use_ai = st.sidebar.toggle("🤖 Enable AI-Assisted Rates", value=True)
 ai_aggressiveness = st.sidebar.slider(
     "AI Aggressiveness", 0.5, 1.5, 1.0, 0.1,
     help="Multiplier on AI-recommended rate lift."
 )
 
-# --- Demand signal weights ---
 st.sidebar.markdown("### 📈 Demand Signal Weights")
 w_airline = st.sidebar.slider("Airline Arrivals", 0.0, 1.0, 0.4, 0.05)
 w_visitor = st.sidebar.slider("Visitor Index", 0.0, 1.0, 0.35, 0.05)
@@ -177,40 +175,27 @@ def build_model():
 # AI-ASSISTED RATE ENGINE
 # -------------------------------------------------------------------
 def ai_recommend(df, signals, w_airline, w_visitor, w_search, aggressiveness):
-    """
-    Rule-based 'AI' recommender. Blends:
-      - base demand (occupancy forecast)
-      - day-of-week pattern
-      - demand signals (airline, visitor, search)
-      - event compression
-    Produces recommended ADR + reasoning.
-    """
     merged = df.merge(signals, on="Date", how="left")
 
-    # Normalize signals to 0–1
     for col in ["Airline_Arrivals_Idx", "Visitor_Index", "Search_Interest_Idx"]:
         merged[col + "_n"] = (merged[col] - merged[col].min()) / \
                              (merged[col].max() - merged[col].min() + 1e-9)
 
-    # Composite demand score (0–1)
     merged["Demand_Score"] = (
         w_airline * merged["Airline_Arrivals_Idx_n"] +
         w_visitor * merged["Visitor_Index_n"] +
         w_search  * merged["Search_Interest_Idx_n"]
     )
 
-    # Combined pressure = occupancy + demand signal + event
     merged["Pressure"] = (
         0.55 * merged["Occupancy"] +
         0.30 * merged["Demand_Score"] +
         0.15 * (merged["Event"] == "⚡").astype(float)
     )
 
-    # Recommended rate: base ADR scaled by pressure vs. 0.65 baseline
     lift = (merged["Pressure"] - 0.65) * 0.6 * aggressiveness
     merged["AI_ADR"] = (merged["ADR"] * (1 + lift)).round(0)
 
-    # Reasoning string
     def reason(row):
         parts = []
         if row["Event"] == "⚡":
@@ -236,7 +221,6 @@ def ai_recommend(df, signals, w_airline, w_visitor, w_search, aggressiveness):
 df = build_model()
 signals = build_demand_signals()
 
-# If user uploaded data, merge to override occupancy/ADR
 if uploaded_df is not None:
     df = df.merge(
         uploaded_df[["Date"] + [c for c in ["Occupancy", "ADR", "Rooms_Sold"]
@@ -253,7 +237,6 @@ if uploaded_df is not None:
 
 ai_df = ai_recommend(df, signals, w_airline, w_visitor, w_search, ai_aggressiveness)
 
-# Apply global rate adjustment + AI
 final_adr = ai_df["AI_ADR"] if use_ai else ai_df["ADR"]
 ai_df["Final_ADR"] = (final_adr * (1 + rate_adjust / 100)).round(0)
 
@@ -265,7 +248,6 @@ ai_df["Final_Rooms"] = (ai_df["Final_Occupancy"] * TOTAL_ROOMS).astype(int)
 ai_df["Final_Revenue"] = ai_df["Final_Rooms"] * ai_df["Final_ADR"]
 ai_df["Final_RevPAR"] = (ai_df["Final_Revenue"] / TOTAL_ROOMS).round(2)
 
-# KPIs
 total_rev = ai_df["Final_Revenue"].sum()
 base_rev = df["Revenue"].sum()
 avg_adr = ai_df["Final_ADR"].mean()
@@ -309,7 +291,6 @@ with tab1:
     cal_df["Week"] = cal_df["Date"].dt.isocalendar().week
     cal_df["DOW"] = cal_df["Date"].dt.weekday
 
-    # Pivot for heatmap
     pivot = cal_df.pivot_table(
         index="Week", columns="DOW", values="Final_Occupancy", aggfunc="mean"
     )
@@ -331,12 +312,21 @@ with tab1:
         "DateStr": "Date", "Final_Occupancy": "Occ",
         "Final_ADR": "ADR", "Final_RevPAR": "RevPAR"
     })
-    st.dataframe(
-        cal_table.style.format({
+
+    # Safe styling with matplotlib fallback
+    try:
+        styled = cal_table.style.format({
             "Occ": "{:.1%}", "ADR": "${:.0f}", "RevPAR": "${:.2f}"
-        }).background_gradient(subset=["Occ"], cmap="RdYlGn"),
-        height=420, use_container_width=True
-    )
+        }).background_gradient(subset=["Occ"], cmap="RdYlGn")
+        st.dataframe(styled, height=420, use_container_width=True)
+    except Exception:
+        # Fallback if matplotlib/styler fails for any reason
+        st.dataframe(
+            cal_table.style.format({
+                "Occ": "{:.1%}", "ADR": "${:.0f}", "RevPAR": "${:.2f}"
+            }),
+            height=420, use_container_width=True
+        )
 
 # -------------------------------------------------------------------
 # TAB 2: AI RATE RECOMMENDER
@@ -355,13 +345,20 @@ with tab2:
         "Final_ADR": "Final Rate", "AI_Reason": "AI Reasoning"
     })
 
-    st.dataframe(
-        ai_view.style.format({
+    try:
+        ai_styled = ai_view.style.format({
             "Occupancy": "{:.1%}", "ADR": "${:.0f}",
             "AI Rate": "${:.0f}", "Final Rate": "${:.0f}"
-        }).background_gradient(subset=["AI Rate"], cmap="Reds"),
-        height=500, use_container_width=True
-    )
+        }).background_gradient(subset=["AI Rate"], cmap="Reds")
+        st.dataframe(ai_styled, height=500, use_container_width=True)
+    except Exception:
+        st.dataframe(
+            ai_view.style.format({
+                "Occupancy": "{:.1%}", "ADR": "${:.0f}",
+                "AI Rate": "${:.0f}", "Final Rate": "${:.0f}"
+            }),
+            height=500, use_container_width=True
+        )
 
     st.markdown("### AI Lift Distribution")
     lift = (ai_df["AI_ADR"] - ai_df["ADR"])
