@@ -29,7 +29,7 @@ import io
 # -------------------------------------------------------------------
 st.set_page_config(
     page_title="BW+ Alexandria RevMgt",
-    page_icon="🏨",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -258,7 +258,7 @@ rev_pct = (total_rev - base_rev) / base_rev * 100
 # -------------------------------------------------------------------
 # HEADER
 # -------------------------------------------------------------------
-st.title("🏨 Best Western Plus Alexandria / Fort Belvoir")
+st.title(" Best Western Plus Alexandria / Fort Belvoir")
 st.subheader("90-Day Revenue Model — Upload · Calendar · AI Rates · Demand Signals")
 
 k1, k2, k3, k4, k5 = st.columns(5)
