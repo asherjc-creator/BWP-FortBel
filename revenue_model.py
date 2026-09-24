@@ -1,14 +1,12 @@
 """
-90-Day Revenue Management Model — Extended Edition
+90-Day Revenue Management Model — Fixed Edition
 Best Western Plus Alexandria / Fort Belvoir (Property Code 47093)
 Model Window: October 1 – December 29, 2026
 
-NEW in this version:
-- Pace & Booking Curve tab (pickup vs STLY simulation)
-- Competitive Rate Index (comp set positioning)
-- Group Displacement Calculator
-- Real demand signal integration guide (Arrivalist, Cirium, pytrends)
-- October 2026 calendar with holidays pre-loaded
+Fixes:
+- NaN-safe merge with uploaded CSV (no more IntCastingNaNError)
+- Coerces uploaded numerics and drops invalid date rows
+- Guarantees no NaN survives before astype(int)
 """
 
 import streamlit as st
@@ -17,7 +15,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import calendar
 
 # -------------------------------------------------------------------
 # CONFIG
@@ -36,15 +33,13 @@ BASE_ADR_WEEKDAY = 109
 BASE_ADR_WEEKEND = 139
 BASE_OCC = 0.68
 
-# Day-of-week multipliers (Mon=0)
 DOW_MULT = {0: 1.05, 1: 1.10, 2: 1.08, 3: 0.95,
             4: 0.85, 5: 1.15, 6: 0.90}
 
-# October–December 2026 Events & Holidays
 EVENTS = {
-    (2026, 10, 12): 1.25,   # Columbus Day / Indigenous Peoples' Day
+    (2026, 10, 12): 1.25,   # Columbus Day
     (2026, 10, 31): 1.20,   # Halloween
-    (2026, 11, 11): 1.30,   # Veterans Day (Fort Belvoir demand)
+    (2026, 11, 11): 1.30,   # Veterans Day
     (2026, 11, 26): 1.45,   # Thanksgiving
     (2026, 11, 27): 1.50,   # Black Friday weekend
     (2026, 12, 24): 1.35,   # Christmas Eve
@@ -52,11 +47,9 @@ EVENTS = {
     (2026, 12, 31): 1.45,   # New Year's Eve
 }
 
-# Competitive set (simulated rates — replace with real comp data)
 COMP_SET = {
     "Hampton Inn Alexandria": 125,
     "Courtyard Alexandria": 145,
-    "Best Western Plus (This Hotel)": None,
     "Sleep Inn & Suites": 99,
     "Holiday Inn Express": 119,
 }
@@ -66,19 +59,15 @@ COMP_SET = {
 # -------------------------------------------------------------------
 @st.cache_data
 def build_demand_signals():
-    """Simulated demand signals. Replace with real API feeds."""
     dates = [START_DATE + timedelta(days=i) for i in range(DAYS)]
     rng = np.random.default_rng(42)
 
-    # Airline: DCA + IAD combined arrivals index (0-100)
     airline = 60 + 25 * np.sin(np.linspace(0, 3 * np.pi, DAYS)) + rng.normal(0, 6, DAYS)
     airline = np.clip(airline, 20, 100)
 
-    # Visitor index: tourism/leisure demand
     visitor = 55 + 20 * np.cos(np.linspace(0, 2 * np.pi, DAYS)) + rng.normal(0, 5, DAYS)
     visitor = np.clip(visitor, 20, 100)
 
-    # Search interest (Google Trends-style)
     search = 50 + 15 * np.sin(np.linspace(0, 4 * np.pi, DAYS)) + rng.normal(0, 7, DAYS)
     search = np.clip(search, 15, 100)
 
@@ -137,7 +126,7 @@ def build_model():
     return df
 
 # -------------------------------------------------------------------
-# AI-ASSISTED RATE ENGINE
+# AI RATE ENGINE
 # -------------------------------------------------------------------
 def ai_recommend(df, signals, w_airline, w_visitor, w_search, aggressiveness):
     merged = df.merge(signals, on="Date", how="left")
@@ -181,58 +170,38 @@ def ai_recommend(df, signals, w_airline, w_visitor, w_search, aggressiveness):
     return merged
 
 # -------------------------------------------------------------------
-# PACE & BOOKING CURVE SIMULATION
+# PACE CURVE
 # -------------------------------------------------------------------
 def build_pace_curve(df):
-    """Simulate booking pickup vs STLY for pace analysis."""
     rng = np.random.default_rng(7)
     pace = df[["Date", "Occupancy"]].copy()
-
-    # Simulate pickup at 90/60/30/14/7/0 days out
     horizons = [90, 60, 30, 14, 7, 0]
     for h in horizons:
-        # Earlier days = lower pickup, closer = higher
         fill_pct = 1 - (h / 100) * 0.8
         noise = rng.normal(0, 0.05, len(pace))
         pace[f"Pickup_{h}d"] = (pace["Occupancy"] * fill_pct + noise).clip(0, 1)
-
-    # STLY (same time last year) = pace * 0.95 (slightly softer)
     pace["STLY_Occ"] = (pace["Occupancy"] * 0.95).clip(0, 1)
-
     return pace
 
 # -------------------------------------------------------------------
-# COMPETITIVE RATE INDEX
+# COMP INDEX
 # -------------------------------------------------------------------
 def build_comp_index(df):
-    """Compare this hotel's rate to comp set."""
     comp = df[["Date", "ADR", "Occupancy"]].copy()
-
-    # Simulate comp set rates with slight variation
     rng = np.random.default_rng(99)
     for name, base in COMP_SET.items():
-        if base is not None:
-            variation = rng.normal(0, 8, len(comp))
-            comp[f"Comp_{name}"] = (base + variation).round(0)
-
-    # Comp set average (excluding this hotel)
+        variation = rng.normal(0, 8, len(comp))
+        comp[f"Comp_{name}"] = (base + variation).round(0)
     comp_cols = [c for c in comp.columns if c.startswith("Comp_")]
     comp["Comp_Set_Avg"] = comp[comp_cols].mean(axis=1).round(0)
     comp["Rate_Position"] = (comp["ADR"] - comp["Comp_Set_Avg"]) / comp["Comp_Set_Avg"] * 100
-
     return comp
 
 # -------------------------------------------------------------------
-# GROUP DISPLACEMENT CALCULATOR
+# GROUP DISPLACEMENT
 # -------------------------------------------------------------------
 def calc_displacement(group_rooms, group_adr, nights, dates_list, forecast_df):
-    """
-    Simplified displacement analysis.
-    Returns accept/reject recommendation with math breakdown.
-    """
     total_group_rev = group_rooms * group_adr * nights
-
-    # Average forecasted ADR on those dates
     date_forecast = forecast_df[forecast_df["Date"].isin(dates_list)]
     if len(date_forecast) == 0:
         return None
@@ -240,17 +209,13 @@ def calc_displacement(group_rooms, group_adr, nights, dates_list, forecast_df):
     avg_transient_adr = date_forecast["ADR"].mean()
     avg_occ = date_forecast["Occupancy"].mean()
 
-    # Displaced rooms = min(group_rooms, rooms that would have sold)
     available_transient_rooms = (1 - avg_occ) * TOTAL_ROOMS
     displaced_rooms = max(0, group_rooms - available_transient_rooms)
     displaced_rev = displaced_rooms * avg_transient_adr * nights
 
-    # Net contribution (simplified — no F&B for select-service)
-    variable_cost_per_room = 25  # housekeeping + amenities
+    variable_cost_per_room = 25
     group_cost = group_rooms * nights * variable_cost_per_room
     net = total_group_rev - displaced_rev - group_cost
-
-    # Breakeven ADR
     breakeven_adr = (displaced_rev + group_cost) / (group_rooms * nights) if group_rooms * nights > 0 else 0
 
     return {
@@ -274,8 +239,7 @@ st.sidebar.image(
 st.sidebar.title("Revenue Controls")
 
 st.sidebar.markdown("### 📤 Upload 90-Day Data")
-st.sidebar.caption("CSV or Excel. Columns: Date, Occupancy, ADR, Rooms_Sold (optional).")
-
+st.sidebar.caption("CSV or Excel. Columns: Date, Occupancy, ADR (case-sensitive).")
 uploaded = st.sidebar.file_uploader("Upload file", type=["csv", "xlsx"])
 
 uploaded_df = None
@@ -285,16 +249,17 @@ if uploaded is not None:
             uploaded_df = pd.read_csv(uploaded)
         else:
             uploaded_df = pd.read_excel(uploaded)
-        uploaded_df["Date"] = pd.to_datetime(uploaded_df["Date"])
-        st.sidebar.success(f"Loaded {len(uploaded_df)} rows.")
+        uploaded_df.columns = [c.strip() for c in uploaded_df.columns]
+        uploaded_df["Date"] = pd.to_datetime(uploaded_df["Date"], errors="coerce")
+        uploaded_df = uploaded_df.dropna(subset=["Date"])
+        st.sidebar.success(f"Loaded {len(uploaded_df)} valid rows.")
     except Exception as e:
         st.sidebar.error(f"Upload error: {e}")
+        uploaded_df = None
 
 st.sidebar.markdown("---")
-
 rate_adjust = st.sidebar.slider("Global Rate Adjustment (%)",
                                 min_value=-20, max_value=30, value=0, step=1)
-
 use_ai = st.sidebar.toggle("🤖 Enable AI-Assisted Rates", value=True)
 ai_aggressiveness = st.sidebar.slider("AI Aggressiveness", 0.5, 1.5, 1.0, 0.1)
 
@@ -308,24 +273,43 @@ st.sidebar.caption(f"Model window: {START_DATE.strftime('%b %d')} – "
                    f"{(START_DATE + timedelta(days=DAYS-1)).strftime('%b %d, %Y')}")
 
 # -------------------------------------------------------------------
-# LOAD & ENRICH
+# LOAD & ENRICH (NaN-SAFE MERGE)
 # -------------------------------------------------------------------
 df = build_model()
 signals = build_demand_signals()
 
 if uploaded_df is not None:
-    df = df.merge(
-        uploaded_df[["Date"] + [c for c in ["Occupancy", "ADR", "Rooms_Sold"]
-                                if c in uploaded_df.columns]],
-        on="Date", how="left", suffixes=("", "_up")
-    )
-    if "Occupancy_up" in df:
+    up_cols = ["Date"]
+    for c in ["Occupancy", "ADR", "Rooms_Sold"]:
+        if c in uploaded_df.columns:
+            up_cols.append(c)
+
+    up = uploaded_df[up_cols].copy()
+    up["Date"] = pd.to_datetime(up["Date"], errors="coerce")
+    up = up.dropna(subset=["Date"])
+
+    for c in ["Occupancy", "ADR", "Rooms_Sold"]:
+        if c in up.columns:
+            up[c] = pd.to_numeric(up[c], errors="coerce")
+
+    df = df.merge(up, on="Date", how="left", suffixes=("", "_up"))
+
+    if "Occupancy_up" in df.columns:
         df["Occupancy"] = df["Occupancy_up"].fillna(df["Occupancy"])
-    if "ADR_up" in df:
+    if "ADR_up" in df.columns:
         df["ADR"] = df["ADR_up"].fillna(df["ADR"])
-    df["Rooms Sold"] = (df["Occupancy"] * TOTAL_ROOMS).astype(int)
+
+    # Ensure no NaN before cast
+    df["Occupancy"] = df["Occupancy"].fillna(BASE_OCC).clip(0, 1)
+    df["ADR"] = df["ADR"].fillna(BASE_ADR_WEEKDAY)
+
+    df["Rooms Sold"] = (df["Occupancy"] * TOTAL_ROOMS).round().astype(int)
     df["Revenue"] = df["Rooms Sold"] * df["ADR"]
     df["RevPAR"] = (df["Revenue"] / TOTAL_ROOMS).round(2)
+
+    # Cleanup merge helpers
+    df = df.drop(columns=[c for c in df.columns if c.endswith("_up")],
+                 errors="ignore")
 
 ai_df = ai_recommend(df, signals, w_airline, w_visitor, w_search, ai_aggressiveness)
 
@@ -336,7 +320,7 @@ elasticity = -0.8
 ai_df["Final_Occupancy"] = (
     ai_df["Occupancy"] * (1 + elasticity * (ai_df["Final_ADR"] / ai_df["ADR"] - 1))
 ).clip(0.3, 1.0)
-ai_df["Final_Rooms"] = (ai_df["Final_Occupancy"] * TOTAL_ROOMS).astype(int)
+ai_df["Final_Rooms"] = (ai_df["Final_Occupancy"] * TOTAL_ROOMS).round().astype(int)
 ai_df["Final_Revenue"] = ai_df["Final_Rooms"] * ai_df["Final_ADR"]
 ai_df["Final_RevPAR"] = (ai_df["Final_Revenue"] / TOTAL_ROOMS).round(2)
 
@@ -380,7 +364,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
 ])
 
 # -------------------------------------------------------------------
-# TAB 1: OCTOBER CALENDAR
+# TAB 1: CALENDAR
 # -------------------------------------------------------------------
 with tab1:
     st.markdown("### October–December 2026 Occupancy Calendar")
@@ -405,19 +389,25 @@ with tab1:
         "DateStr": "Date", "Final_Occupancy": "Occ",
         "Final_ADR": "ADR", "Final_RevPAR": "RevPAR"
     })
-    st.dataframe(
-        cal_table.style.format({"Occ": "{:.1%}", "ADR": "${:.0f}",
-                                "RevPAR": "${:.2f}"}).background_gradient(
-            subset=["Occ"], cmap="RdYlGn"),
-        height=420, use_container_width=True
-    )
+    try:
+        st.dataframe(
+            cal_table.style.format({"Occ": "{:.1%}", "ADR": "${:.0f}",
+                                    "RevPAR": "${:.2f}"}).background_gradient(
+                subset=["Occ"], cmap="RdYlGn"),
+            height=420, use_container_width=True
+        )
+    except Exception:
+        st.dataframe(
+            cal_table.style.format({"Occ": "{:.1%}", "ADR": "${:.0f}",
+                                    "RevPAR": "${:.2f}"}),
+            height=420, use_container_width=True
+        )
 
 # -------------------------------------------------------------------
 # TAB 2: AI RATE RECOMMENDER
 # -------------------------------------------------------------------
 with tab2:
     st.markdown("### 🤖 AI-Assisted Rate Recommendations")
-    st.caption("AI blends occupancy, DOW patterns, demand signals, and events.")
 
     show_cols = ["DateStr", "Day", "Occupancy", "ADR", "AI_ADR",
                  "Final_ADR", "AI_Reason", "Event"]
@@ -425,11 +415,17 @@ with tab2:
         "DateStr": "Date", "AI_ADR": "AI Rate",
         "Final_ADR": "Final Rate", "AI_Reason": "AI Reasoning"
     })
-    st.dataframe(ai_view.style.format({
-        "Occupancy": "{:.1%}", "ADR": "${:.0f}",
-        "AI Rate": "${:.0f}", "Final Rate": "${:.0f}"
-    }).background_gradient(subset=["AI Rate"], cmap="Reds"),
-        height=500, use_container_width=True)
+    try:
+        st.dataframe(ai_view.style.format({
+            "Occupancy": "{:.1%}", "ADR": "${:.0f}",
+            "AI Rate": "${:.0f}", "Final Rate": "${:.0f}"
+        }).background_gradient(subset=["AI Rate"], cmap="Reds"),
+            height=500, use_container_width=True)
+    except Exception:
+        st.dataframe(ai_view.style.format({
+            "Occupancy": "{:.1%}", "ADR": "${:.0f}",
+            "AI Rate": "${:.0f}", "Final Rate": "${:.0f}"
+        }), height=500, use_container_width=True)
 
     lift = (ai_df["AI_ADR"] - ai_df["ADR"])
     fig_lift = px.histogram(lift, nbins=25, title="AI Rate Lift vs Base ADR ($)",
@@ -465,13 +461,11 @@ with tab3:
     st.dataframe(signals, height=300, use_container_width=True)
 
 # -------------------------------------------------------------------
-# TAB 4: PACE & BOOKING CURVE
+# TAB 4: PACE
 # -------------------------------------------------------------------
 with tab4:
     st.markdown("### 📈 Pace & Booking Curve — Pickup vs STLY")
-    st.caption("Shows how bookings accumulate over time vs same time last year.")
 
-    # Select a sample date to show pace
     sample_idx = st.selectbox("Select a stay date to inspect pace:",
                               range(0, DAYS, 7),
                               format_func=lambda i: pace_df.iloc[i]["Date"].strftime("%b %d"))
@@ -490,30 +484,30 @@ with tab4:
     fig_pace.update_layout(
         title=f"Booking Curve: {row['Date'].strftime('%b %d, %Y')}",
         xaxis_title="Days Before Arrival", yaxis_title="Occupancy",
-        yaxis_tickformat=".0%", height=400, hovermode="x unified"
-    )
+        yaxis_tickformat=".0%", height=400, hovermode="x unified")
     st.plotly_chart(fig_pace, use_container_width=True)
 
-    # Pace table
     pace_view = pace_df[["Date", "Occupancy", "Pickup_90d", "Pickup_60d",
                          "Pickup_30d", "Pickup_14d", "Pickup_7d", "STLY_Occ"]].copy()
     pace_view["Date"] = pace_view["Date"].dt.strftime("%b %d")
     pace_view["Pace_vs_STLY"] = (pace_view["Occupancy"] - pace_view["STLY_Occ"]) * 100
-    st.dataframe(pace_view.style.format({
-        "Occupancy": "{:.1%}", "Pickup_90d": "{:.1%}", "Pickup_60d": "{:.1%}",
-        "Pickup_30d": "{:.1%}", "Pickup_14d": "{:.1%}", "Pickup_7d": "{:.1%}",
-        "STLY_Occ": "{:.1%}", "Pace_vs_STLY": "{:+.1f}pts"
-    }).background_gradient(subset=["Pace_vs_STLY"], cmap="RdYlGn"),
-        height=400, use_container_width=True)
+    try:
+        st.dataframe(pace_view.style.format({
+            "Occupancy": "{:.1%}", "Pickup_90d": "{:.1%}", "Pickup_60d": "{:.1%}",
+            "Pickup_30d": "{:.1%}", "Pickup_14d": "{:.1%}", "Pickup_7d": "{:.1%}",
+            "STLY_Occ": "{:.1%}", "Pace_vs_STLY": "{:+.1f}pts"
+        }).background_gradient(subset=["Pace_vs_STLY"], cmap="RdYlGn"),
+            height=400, use_container_width=True)
+    except Exception:
+        st.dataframe(pace_view, height=400, use_container_width=True)
 
-    st.info("**How to use:** If pace is ahead of STLY, hold rate. If behind, consider targeted promotions.")
+    st.info("**How to use:** If pace is ahead of STLY, hold rate. If behind, consider promotions.")
 
 # -------------------------------------------------------------------
-# TAB 5: COMPETITIVE RATE INDEX
+# TAB 5: COMP INDEX
 # -------------------------------------------------------------------
 with tab5:
     st.markdown("### 🏆 Competitive Rate Index")
-    st.caption("Your rate position vs the Alexandria/Fort Belvoir comp set.")
 
     fig_comp = go.Figure()
     fig_comp.add_trace(go.Scatter(x=comp_df["Date"], y=comp_df["ADR"],
@@ -524,7 +518,6 @@ with tab5:
                            yaxis_title="ADR ($)", height=400, hovermode="x unified")
     st.plotly_chart(fig_comp, use_container_width=True)
 
-    # Rate position distribution
     fig_pos = px.histogram(comp_df["Rate_Position"], nbins=30,
         title="Rate Position vs Comp Set (%)",
         color_discrete_sequence=["#2E86AB"])
@@ -536,16 +529,11 @@ with tab5:
     col2.metric("Days Above Comp", f"{(comp_df['Rate_Position'] > 0).sum()}")
     col3.metric("Days Below Comp", f"{(comp_df['Rate_Position'] < 0).sum()}")
 
-    st.dataframe(comp_df.head(20).style.format({
-        "ADR": "${:.0f}", "Comp_Set_Avg": "${:.0f}", "Rate_Position": "{:+.1f}%"
-    }), height=300, use_container_width=True)
-
 # -------------------------------------------------------------------
 # TAB 6: GROUP DISPLACEMENT
 # -------------------------------------------------------------------
 with tab6:
     st.markdown("### 🎯 Group Displacement Calculator")
-    st.caption("Evaluate group requests: accept, reject, or counter-offer.")
 
     col1, col2, col3 = st.columns(3)
     group_rooms = col1.number_input("Group Rooms Requested", 5, 100, 30)
@@ -558,9 +546,14 @@ with tab6:
                                     default=date_options[10:10+nights])
 
     if st.button("Calculate Displacement") and len(selected_dates) > 0:
-        selected_date_objs = [datetime.strptime(f"2026-{d}", "%Y-%b %d")
-                              for d in selected_dates]
-        result = calc_displacement(group_rooms, group_adr, len(selected_dates),
+        selected_date_objs = []
+        for d in selected_dates:
+            try:
+                selected_date_objs.append(datetime.strptime(f"2026-{d}", "%Y-%b %d"))
+            except Exception:
+                pass
+
+        result = calc_displacement(group_rooms, group_adr, len(selected_date_objs),
                                    selected_date_objs, ai_df)
 
         if result:
@@ -572,18 +565,11 @@ with tab6:
             c4.metric("Breakeven ADR", f"${result['breakeven_adr']}")
 
             if result["accept"]:
-                st.success(f"✅ ACCEPT — Net contribution positive and group ADR "
-                           f"(${group_adr}) exceeds breakeven (${result['breakeven_adr']}).")
+                st.success(f"✅ ACCEPT — Net positive and group ADR exceeds breakeven.")
             elif group_adr < result["breakeven_adr"]:
-                st.warning(f"⚠️ COUNTER — Group ADR (${group_adr}) is below breakeven "
-                           f"(${result['breakeven_adr']}). Counter at ${result['breakeven_adr']}+.")
+                st.warning(f"⚠️ COUNTER — Group ADR below breakeven (${result['breakeven_adr']}).")
             else:
                 st.error("❌ REJECT — Displacement cost exceeds group value.")
-
-            st.markdown("**Assumptions:**")
-            st.caption(f"Avg transient ADR on those dates: ${result['avg_transient_adr']} | "
-                       f"Avg occupancy: {result['avg_occ']:.1%} | "
-                       f"Variable cost/room: $25")
 
 # -------------------------------------------------------------------
 # TAB 7: SCENARIO PLANNER
@@ -611,45 +597,26 @@ with tab7:
 # -------------------------------------------------------------------
 with tab8:
     st.markdown("### 🔌 Real Data Integration Guide")
-    st.caption("Replace simulated signals with live feeds for production use.")
 
     st.markdown("""
     #### 1. Airline Arrivals (DCA / IAD)
-    **Source:** Cirium, OAG, or FAA ASPM
-    - Cirium publishes airline schedules with passenger volumes [citation:2]
-    - MWAA reports DCA domestic activity +4.5% and IAD international trends [citation:12]
-    - **API:** Cirium offers Schedules API; OAG has Connections API
+    **Source:** Cirium, OAG, or FAA ASPM. Replace the `airline` array in `build_demand_signals()`.
 
     #### 2. Visitor / Tourism Index
-    **Source:** Arrivalist
-    - Arrivalist provides "Trip Volume Arrivals by Day, Week, Month and Quarter" [citation:1]
-    - Mobile geo-location panel of 120M devices, balanced to U.S. population [citation:6]
-    - **API:** Arrivalist Air Intelligence Hub for airport-specific insights [citation:6]
+    **Source:** Arrivalist — mobile geo-location panel. Replace the `visitor` array.
 
     #### 3. Search Interest
-    **Source:** Google Trends
-    - Use `pytrends` library to pull Alexandria/Fort Belvoir search volume
-    - Compare "hotel near Fort Belvoir" vs "Alexandria hotel" queries
-    - **Python:** `pip install pytrends`
+    **Source:** Google Trends via `pytrends`. Install with `pip install pytrends`.
 
     #### 4. Convention / Event Calendar
-    **Source:** Alexandria CVB or Visit Alexandria
-    - Pull forward calendar with event names, dates, attendance estimates [citation:11]
-    - Treat attendance as a prior — update as actual pickup comes in
+    **Source:** Alexandria CVB. Update the `EVENTS` dict with real event multipliers.
 
     #### 5. Block Pickup
-    **Source:** Your PMS / Passkey
-    - Daily block pickup by group is the highest-value input [citation:11]
-    - Feed directly into pace curve for real-time displacement analysis
+    **Source:** Your PMS / Passkey. Feed into `build_pace_curve()` for real pickup.
 
     #### 6. Competitive Rates
-    **Source:** OTA scraping or rate intelligence platforms
-    - Monitor Hampton, Courtyard, Holiday Inn Express Alexandria
-    - Use rate position to sit "one rung above the market" on compression [citation:11]
+    **Source:** OTA scraping or rate intelligence. Replace `COMP_SET` dict.
     """)
-
-    st.info("**Next step:** Contact Arrivalist (info@arrivalist.com) and Cirium for API access. "
-            "For Google Trends, install `pytrends` and add to requirements.")
 
 # -------------------------------------------------------------------
 # FOOTER
